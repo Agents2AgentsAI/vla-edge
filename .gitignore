@@ -1,0 +1,43 @@
+# Model weights and anything that embeds them.
+# A TensorRT plan is a derivative work containing the checkpoint weights:
+# publishing one redistributes the model. Build locally from recipes instead.
+*.plan
+*.engine
+*.safetensors
+*.gguf
+*.mlpackage/
+*.mlmodelc/
+*.onnx
+*.pt
+*.pth
+*.bin
+engines/
+engines_*/
+onnx/
+onnx_*/
+*.timing.cache
+timing.cache*
+
+# Build outputs and local state
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.so
+*.o
+.venv*/
+node_modules/
+.DS_Store
+runs/
+results/
+*.log
+.pytest_cache/
+.ruff_cache/
+
+# run_task.sh's runtime config copy (keeps the tracked config clean)
+examples/bimanual-yam/configs/*.run.yaml
+examples/bimanual-yam/configs/*.setup.bak
+# calibrate_grippers.py's pre-write backup of the tracked config
+examples/bimanual-yam/configs/*.calibration.bak
+# rollout outputs and scene snapshots from the bimanual-yam example
+examples/bimanual-yam/yam_eval_runs/

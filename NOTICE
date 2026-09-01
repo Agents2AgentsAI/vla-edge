@@ -1,0 +1,52 @@
+vla-edge
+Copyright 2026 Agents2Agents, Inc.
+
+This product includes software developed at Agents2Agents, Inc. and is
+licensed under the Apache License, Version 2.0. See LICENSE.
+
+Third-party models and code
+
+This repository contains NO model weights and NO third-party model code.
+
+MolmoAct2 (the vision-language-action model this runtime was built around) is
+a work of the Allen Institute for AI, released under the Apache License 2.0:
+
+    Models:  https://huggingface.co/collections/allenai/molmoact2-models
+    Code:    https://github.com/allenai/molmoact2
+    Paper:   https://arxiv.org/abs/2605.02881
+
+Weights are downloaded by the user from the upstream distributor at build
+time, under the upstream license, and are never redistributed here. Model
+definition code is loaded from the upstream checkpoint via transformers
+`trust_remote_code`; this repository carries only a thin compatibility shim
+documenting the loading workarounds that checkpoint requires.
+
+Note for anyone deriving artifacts from a checkpoint: a compiled inference
+artifact (a TensorRT plan, a CoreML package, an NPU binary) embeds the model
+weights and is therefore a derivative work of the checkpoint. Distributing
+one distributes the weights. This repository ships build recipes rather than
+compiled artifacts, in part for that reason. A prebuilt engine bundle is
+published separately as a deliberate, attributed redistribution under the
+checkpoint's Apache-2.0 license; its README carries the provenance notes.
+
+Any other policies referenced in documentation are the work of their
+respective authors and are likewise not redistributed here.
+
+The files under `examples/bimanual-yam/gello_min/` contain adapted portions of
+GELLO from the YAM repository:
+
+    https://github.com/williamtsai726/YAM/tree/main/gello_software
+
+Those portions are licensed under MIT. The required copyright and license
+text are in THIRD_PARTY_NOTICES.md.
+
+The robot example also depends on, but does not vendor, I2RT:
+
+    https://github.com/i2rt-robotics/i2rt
+
+Attribution
+
+The serving, evaluation, and backend implementations were developed by the
+Agents2Agents robotics team. Performance work is described at:
+
+    https://agents2agents.ai/blog/molmoact2-jetson-thor

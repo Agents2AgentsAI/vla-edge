@@ -1,0 +1,2 @@
+# ruckig 0.15.3 uses the deprecated cmake.targets setting.
+scikit-build-core<0.10

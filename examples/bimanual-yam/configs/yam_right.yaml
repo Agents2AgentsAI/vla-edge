@@ -1,0 +1,16 @@
+# Right-arm config for the bimanual YAM MolmoAct2 eval launcher.
+# Only the right-arm robot + start_joints are read from this file; cameras,
+# storage, lerobot, and eval settings all come from yam_left.yaml.
+
+# Right YAM arm. `channel` is the CAN interface name from `ip link show`.
+robot:
+  _target_: gello_min.yam.YAMRobot
+  channel: "can_right"
+  # Run `python calibrate_grippers.py` once to replace null with [closed, open].
+  gripper_limits: null
+
+agent:
+  start_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+hz: 30
+max_steps: 1000

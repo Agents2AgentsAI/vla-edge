@@ -1,0 +1,96 @@
+# Left-arm config for the bimanual YAM MolmoAct2 eval launcher.
+# This file also carries all the shared/session-level settings (cameras,
+# storage, lerobot conversion, eval). yam_right.yaml only carries the
+# right-arm robot block.
+
+# 3 RealSense cameras, in the order MolmoAct2-BimanualYAM was trained on.
+# `python configure_rig.py` discovers and writes the three camera serials.
+# ORDER MATTERS: the model was trained on [top, left, right]; here
+# `front_camera` plays the `top` role. Swapped cameras produce confident,
+# plausible, wrong actions and nothing will error.
+sensors:
+  cameras:
+    left_camera:
+      device_id: "REPLACE_WITH_LEFT_WRIST_CAMERA_SERIAL"
+    front_camera:
+      device_id: "REPLACE_WITH_SCENE_CAMERA_SERIAL"
+    right_camera:
+      device_id: "REPLACE_WITH_RIGHT_WRIST_CAMERA_SERIAL"
+
+# Left YAM arm. `channel` is the CAN interface name from `ip link show`.
+robot:
+  _target_: gello_min.yam.YAMRobot
+  channel: "can_left"
+  # Run `python calibrate_grippers.py` once to replace null with [closed, open].
+  gripper_limits: null
+
+# Only `start_joints` is used by eval (the arm interpolates here between
+# rollouts). 7-D: 6 arm joints + 1 gripper.
+agent:
+  start_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+hz: 30            # control loop rate
+max_steps: 2500   # per-rollout timeout in control steps
+
+# Where rollouts + the LeRobot dataset are written:
+#   {base_dir}/data/{task_directory}/{eval,success,failure}/...
+#   {base_dir}/data/{task_directory}/eval_lerobot_v30/{session_ts}/
+storage:
+  base_dir: "./yam_eval_runs"
+  task_directory: "session"
+  language_instruction: "pick up the object and put it in the basket"
+  save_frames: false            # frames off by default; flip true to record video
+  saver_max_workers: 2
+  png_compress_level: 1
+
+# End-of-session LeRobot v3.0 conversion knobs. NOTE: the converter module
+# (lerobot_convert.py) is not shipped with this example. Without it, the
+# conversion is skipped with a logged error and raw rollouts are kept.
+lerobot:
+  fps: 30
+  robot_type: "molmoact_dual_arm"
+  hf_repo_id: "local/yam_eval_session"   # repo_id stamped into the dataset
+  action_mode: "next_joint_fields"        # next_joint_fields | next_state | copy_state
+  vcodec: "libsvtav1"                      # needs ffmpeg w/ SVT-AV1; use "libx264" if unavailable
+  image_writer_processes: 8
+  image_writer_threads: 8
+  parallel_encoding: true
+  sanitize_online_viz_meta: true
+
+# Eval session configuration (consumed by launch_yaml_eval_molmoact.py).
+eval:
+  live_view_enabled: false     # show the 3-pane cv2 window during rollouts
+
+  # How inference runs:
+  #   server -> POST observations to a running /act inference server (default),
+  #             e.g. `vla-edge-serve --embodiment bimanual-yam`
+  #   local  -> load the checkpoint in-process via transformers
+  mode: server
+
+  # Used when mode == server. Accepts a full URL, a bare host:port, or an
+  # ngrok hostname; "/act" is appended automatically. Defaults to the local
+  # server's default port if omitted.
+  molmoact_server: "127.0.0.1:8202"
+
+  # Used when mode == local. Needs transformers (+ huggingface_hub, PIL,
+  # accelerate, safetensors). bf16 needs ~10-14 GB VRAM; fp32 ~26 GB.
+  local:
+    repo_id: "allenai/MolmoAct2-BimanualYAM"
+    device: "cuda:0"
+    dtype: "bfloat16"          # bfloat16 | float16 | float32
+    num_steps: 10              # flow-matching denoising steps
+    enable_cuda_graph: false
+    warmup: true               # eat the first-call latency at startup
+
+  # Long-lived ZMQ camera server. When enabled, the launcher pulls obs from the
+  # server instead of opening RealSense devices in-process. Start it first:
+  #     bash start_camera_server.sh
+  # Set enabled: false to open the cameras in-process (one fewer terminal, but
+  # the cv2 viewer freezes during inference).
+  camera_server:
+    enabled: true
+    endpoint: "tcp://127.0.0.1:5555"
+    request_timeout_ms: 500
+    max_frame_age_sec: 0.5
+    pub_endpoint: "tcp://127.0.0.1:5556"   # PUB stream the live viewer subscribes to
+    recv_timeout_ms: 100

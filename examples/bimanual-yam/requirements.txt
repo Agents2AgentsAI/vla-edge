@@ -1,0 +1,28 @@
+# Python deps for the bimanual YAM closed-loop client (examples/bimanual-yam).
+# Install into the environment that drives the robot, e.g.:
+#     pip install -r examples/bimanual-yam/requirements.txt
+#
+# One dep is NOT on PyPI and must be installed separately:
+#   * i2rt: YAM low-level motor/CAN driver: https://github.com/i2rt-robotics/i2rt
+#
+# The optional end-of-session LeRobot dataset conversion additionally needs the
+# converter module from the upstream molmoact2 repo (lerobot_convert.py) plus
+# `lerobot`. Neither ships with this example; without them conversion is
+# skipped gracefully and raw rollouts are kept.
+
+numpy
+torch
+transformers
+huggingface_hub
+hf_transfer
+json_numpy
+requests
+opencv-python
+Pillow
+h5py
+omegaconf
+tyro
+pyzmq
+
+# RealSense camera SDK (needed unless you only run against pre-recorded obs).
+pyrealsense2
