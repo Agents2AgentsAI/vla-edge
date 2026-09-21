@@ -9,12 +9,13 @@ Keeping this shared is the point of the architecture. See ``docs/spec.md``.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
 import numpy as np
 
-from .config import Embodiment
+from .config import Embodiment, PolicySpec, default_policy, get_policy_embodiment
 
 log = logging.getLogger("vla_edge.pipeline")
 
@@ -39,45 +40,46 @@ def to_pil(arr: Any) -> Any:
 class Pipeline:
     """One loaded checkpoint plus one backend."""
 
-    def __init__(self, embodiment: Embodiment, backend: Any) -> None:
+    def __init__(
+        self,
+        embodiment: Embodiment,
+        policy: PolicySpec,
+        backend: Any,
+    ) -> None:
         self.embodiment = embodiment
+        self.policy = policy
         self.backend = backend
 
     @classmethod
     def load(
         cls,
-        embodiment: Embodiment,
+        policy: PolicySpec | Embodiment,
         backend: str = "torch",
         device: str = "cuda:0",
         dtype: str = "bfloat16",
         **backend_kwargs: Any,
     ) -> Pipeline:
-        from .backends.base import REGISTRY
-
-        # Importing a backend module is what registers it.
-        if backend == "torch":
-            from .backends.torch import backend as _
-            from .checkpoint import load_checkpoint
-        elif backend == "tensorrt":
-            from .backends.tensorrt import backend as _  # noqa: F401
-            from .backends.tensorrt.host import load_checkpoint
+        # Passing an Embodiment is the legacy API and selects its default
+        # policy. New callers should select a PolicySpec explicitly.
+        if isinstance(policy, Embodiment):
+            embodiment = policy
+            selected_policy = default_policy(embodiment)
         else:
-            raise ValueError(f"unsupported backend {backend!r}")
+            selected_policy = policy
+            embodiment = get_policy_embodiment(selected_policy)
 
-        checkpoint_kwargs: dict[str, Any] = {"device": device, "dtype": dtype}
-        if backend == "tensorrt":
-            engine_dir = backend_kwargs.get("engine_dir")
-            if not engine_dir:
-                raise TypeError("the tensorrt backend requires engine_dir=<path>")
-            checkpoint_kwargs["engine_dir"] = engine_dir
-        model, processor, _dir = load_checkpoint(
-            embodiment.repo_id, **checkpoint_kwargs
-        )
-        impl = REGISTRY.create(
-            backend, model=model, processor=processor, embodiment=embodiment,
+        from .backends.families import FAMILIES
+
+        impl = FAMILIES.load(
+            selected_policy.model_family,
+            backend=backend,
+            policy=selected_policy,
+            embodiment=embodiment,
+            device=device,
+            dtype=dtype,
             **backend_kwargs,
         )
-        return cls(embodiment, impl)
+        return cls(embodiment, selected_policy, impl)
 
     def predict(
         self,
@@ -86,8 +88,15 @@ class Pipeline:
         state: np.ndarray,
         num_steps: int | None = None,
         enable_cuda_graph: bool = False,
+        seed: int | None = None,
+        noise: Any | None = None,
     ) -> np.ndarray:
         """Run one inference and return ``(horizon, action_dim)`` float32.
+
+        ``seed`` pins the sampler's noise for backends that draw one (ABC-VLA's
+        flow-matching noise). A client sends the same seed for every chunk of
+        an episode so consecutive plans differ only by the observation, not
+        by the sampler; backends that do not take a seed are left untouched.
 
         ``cameras`` is keyed by the embodiment's camera names; ordering is
         taken from the embodiment, not from dict insertion order, so a client
@@ -98,16 +107,46 @@ class Pipeline:
         emb.validate_cameras(list(cameras))
         # Order comes from the embodiment, never from the caller's dict.
         images = [to_pil(cameras[name]) for name in emb.camera_names]
-        steps = int(num_steps if num_steps is not None else emb.default_num_steps)
+        steps = int(
+            num_steps
+            if num_steps is not None
+            else self.policy.default_num_steps
+        )
 
         if hasattr(self.backend, "generate_actions"):
-            return self.backend.generate_actions(
+            kwargs: dict[str, Any] = {}
+            if seed is not None and noise is not None:
+                raise ValueError("supply either seed or explicit noise, not both")
+            if noise is not None:
+                if "noise" not in inspect.signature(self.backend.generate_actions).parameters:
+                    raise ValueError(f"backend {self.backend.name!r} does not accept explicit noise")
+                kwargs["noise"] = noise
+            if seed is not None:
+                if "seed" not in inspect.signature(self.backend.generate_actions).parameters:
+                    raise ValueError(
+                        f"backend {type(self.backend).__name__} does not accept a sampler seed"
+                    )
+                kwargs["seed"] = int(seed)
+            actions = self.backend.generate_actions(
                 images=images,
                 instruction=instruction,
                 state=state,
                 num_steps=steps,
                 enable_cuda_graph=enable_cuda_graph,
+                **kwargs,
             )
+            result = np.asarray(actions, dtype=np.float32)
+            expected = (self.policy.action_horizon, emb.action_dim)
+            if result.shape != expected:
+                raise ValueError(
+                    f"policy {self.policy.name!r} returned actions with shape "
+                    f"{result.shape}; expected {expected}"
+                )
+            if not np.isfinite(result).all():
+                raise ValueError(
+                    f"policy {self.policy.name!r} returned non-finite actions"
+                )
+            return result
         raise NotImplementedError(
             f"backend {self.backend.name!r} does not expose "
             "generate_actions; the staged three-call interface is not "

@@ -26,3 +26,9 @@ pyzmq
 
 # RealSense camera SDK (needed unless you only run against pre-recorded obs).
 pyrealsense2
+
+# ABC-VLA tokenization, wire protocol and shared rig configuration.
+sentencepiece>=0.2
+msgpack>=1.0
+websockets>=14
+PyYAML>=6.0

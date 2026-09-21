@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run eval rollout(s), then always home, open the grippers, and de-energize.
-# This applies to clean exit, crash, and Ctrl-C. If the launcher remains alive
+# Run eval rollout(s); the launcher homes through its active controllers.
+# The final fallback only disables and checks motors, including after a crash. If the launcher remains alive
 # after its explicit completion line, the wrapper terminates it so the final
 # hardware shutdown can proceed. Usage: run_rollout.sh [-n N]
 #
@@ -17,8 +17,8 @@ LOG=$(mktemp /tmp/yam_rollout.XXXXXX.log)
 GRACE=20
 TERM_GRACE=25
 
-home_arms() { "$PY" -u home_arms.py --yes; }
-trap home_arms EXIT
+verify_disabled() { "$PY" -u home_arms.py --status; }
+trap verify_disabled EXIT
 
 # run_task.sh points YAM_LEFT_CONFIG at its gitignored runtime copy; direct
 # invocations use the tracked config as-is.

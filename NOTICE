@@ -50,3 +50,17 @@ The serving, evaluation, and backend implementations were developed by the
 Agents2Agents robotics team. Performance work is described at:
 
     https://agents2agents.ai/blog/molmoact2-jetson-thor
+
+ABC-VLA
+
+The ABC-VLA serving adapter interoperates with amazon-far/abc:
+    https://github.com/amazon-far/abc
+
+ABC project code is Apache-2.0. Its VLA checkpoint includes Gemma-derived
+weights governed by the Gemma Terms of Use, including the Prohibited Use
+Policy. Compiled ABC engines embed those weights and retain those terms:
+    https://ai.google.dev/gemma/terms
+    https://ai.google.dev/gemma/prohibited_use_policy
+
+ABC model code, tokenizers, weights and compiled plans are distributed in a
+separate attributed bundle. No such model assets are committed here.

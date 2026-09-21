@@ -19,6 +19,8 @@ from pathlib import Path
 import tensorrt as trt
 import torch
 
+from .logger import deserialization_scope, get_logger
+
 _TRT_TO_TORCH = {
     trt.DataType.FLOAT: torch.float32,
     trt.DataType.HALF: torch.float16,
@@ -28,27 +30,6 @@ _TRT_TO_TORCH = {
     trt.DataType.INT64: torch.int64,
     trt.DataType.BOOL: torch.bool,
 }
-
-_LOGGER = trt.Logger(trt.Logger.WARNING)
-_DEVICE_MISMATCH_WARNING = (
-    "Using an engine plan file across different models of device"
-)
-
-
-class _VerifiedDeviceLogger(trt.ILogger):
-    """Drop only TensorRT's generic device warning after an exact check."""
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def log(self, severity: trt.ILogger.Severity, message: str) -> None:
-        if _DEVICE_MISMATCH_WARNING in message:
-            return
-        _LOGGER.log(severity, message)
-
-
-_VERIFIED_DEVICE_LOGGER = _VerifiedDeviceLogger()
-
 
 class TrtEngine:
     """Deserialized engine + execution context with a torch-tensor interface.
@@ -66,13 +47,12 @@ class TrtEngine:
         suppress_device_mismatch_warning: bool = False,
     ) -> None:
         self.device = torch.device(device)
-        self._logger = (
-            _VERIFIED_DEVICE_LOGGER
-            if suppress_device_mismatch_warning
-            else _LOGGER
-        )
-        runtime = trt.Runtime(self._logger)
-        self.engine = runtime.deserialize_cuda_engine(Path(path).read_bytes())
+        self._logger = get_logger(trt)
+        with deserialization_scope(
+            trt, verified_device=suppress_device_mismatch_warning,
+        ):
+            self._runtime = trt.Runtime(self._logger)
+            self.engine = self._runtime.deserialize_cuda_engine(Path(path).read_bytes())
         if self.engine is None:
             raise RuntimeError(f"failed to deserialize {path}")
         self.context = self.engine.create_execution_context()
@@ -126,6 +106,7 @@ class TrtEngine:
         self._graphs.clear()
         self.context = None
         self.engine = None
+        self._runtime = None
         self.stream = None
 
     def _bind(self, tensors: dict[str, torch.Tensor], input_shapes: bool) -> None:

@@ -61,6 +61,9 @@ def move_to_start_position(
     steps = min(int(max_delta / 0.01), 100)
 
     print(f"Moving robot to start position: {reset_joints}")
+    last_command = None
     for jnt in np.linspace(curr_joints, reset_joints, steps):
         env.step(jnt, reset=True)
+        last_command = np.asarray(jnt).copy()
         time.sleep(0.001)
+    return last_command

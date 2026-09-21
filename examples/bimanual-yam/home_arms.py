@@ -104,6 +104,25 @@ def _ancestor_pids(pid: int | None = None) -> set[int]:
     return ancestors
 
 
+def _is_shared_yam_task(argv: Sequence[bytes], cwd: str | None = None) -> bool:
+    """Recognize the example's task script without matching unrelated run_task.py files."""
+    if not argv or not argv[0].rsplit(b"/", 1)[-1].startswith(b"python"):
+        return False
+    for arg in argv[1:]:
+        if not arg:
+            continue
+        if arg in (b"-m", b"-c"):
+            return False
+        if arg.startswith(b"-"):
+            continue
+        return (
+            arg.endswith(b"/examples/bimanual-yam/run_task.py")
+            or arg == b"examples/bimanual-yam/run_task.py"
+            or (arg == b"run_task.py" and cwd is not None and cwd.endswith("/examples/bimanual-yam"))
+        )
+    return False
+
+
 def find_robot_drivers() -> list[int]:
     excluded = _ancestor_pids()
     matches = []
@@ -117,7 +136,14 @@ def find_robot_drivers() -> list[int]:
             argv = (entry / "cmdline").read_bytes().split(b"\0")
         except OSError:
             continue
-        if any(arg.endswith(name) for arg in argv for name in ROBOT_DRIVER_BASENAMES):
+        try:
+            cwd = str((entry / "cwd").resolve(strict=True))
+        except OSError:
+            cwd = None
+        if (
+            any(arg.endswith(name) for arg in argv for name in ROBOT_DRIVER_BASENAMES)
+            or _is_shared_yam_task(argv, cwd)
+        ):
             matches.append(pid)
     return sorted(matches)
 
@@ -287,6 +313,81 @@ def home_arms_together(
                 ok = False
 
     return HomeResult(frozenset(homed), ok and homed == set(channels))
+
+
+def home_active_robot(
+    robot: Any,
+    *,
+    previous_command: np.ndarray | None = None,
+    max_joint_vel: float = DEFAULT_HOME_MAX_VEL,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Home with an existing controller and leave it enabled for its owner to close.
+
+    Both arms move together. Keep the current gripper commands until the arms
+    reach q=0, then open to the calibrated normalized endpoint. No camera reads,
+    new motor interfaces, disable frames or enable frames occur in this helper.
+    """
+    if not math.isfinite(max_joint_vel) or max_joint_vel <= 0:
+        raise ValueError("home max joint velocity must be finite and positive")
+    speed = min(max_joint_vel, DEFAULT_HOME_MAX_VEL)
+    measured = np.asarray(robot.get_joint_state(), dtype=np.float64)
+    if measured.shape not in ((7,), (14,)) or not np.isfinite(measured).all():
+        raise ValueError("active homing requires finite YAM joint and gripper state")
+    current = (
+        measured.copy()
+        if previous_command is None
+        else np.asarray(previous_command, dtype=np.float64).copy()
+    )
+    if current.shape != measured.shape or not np.isfinite(current).all():
+        raise ValueError("invalid last command for active homing")
+    grippers = np.arange(6, len(current), 7)
+    arms = np.array([i for i in range(len(current)) if i % 7 != 6])
+    target = current.copy()
+    target[arms] = 0.0
+    duration = max(MIN_HOME_DURATION_S, float(np.max(np.abs(current[arms]))) / speed)
+    steps = max(1, math.ceil(duration * CONTROL_HZ))
+    def read_state():
+        value = np.asarray(robot.get_joint_state(), dtype=np.float64)
+        if value.shape != current.shape or not np.isfinite(value).all():
+            raise RuntimeError("invalid feedback during active homing")
+        return value
+
+    print(f"homing with active controllers over {duration:.1f} s", flush=True)
+    for index in range(1, steps + 1):
+        read_state()  # The live adapter also checks motor-chain health.
+        command = current + (target - current) * (index / steps)
+        robot.command_joint_state(command)
+        sleep(1 / CONTROL_HZ)
+    sleep(0.5)
+    actual = read_state()
+    if float(np.max(np.abs(actual[arms]))) > HOME_TOLERANCE_RAD:
+        raise RuntimeError(f"active homing error exceeds {HOME_TOLERANCE_RAD:.2f} rad")
+
+    # Grippers stay powered and use the saved calibration, without reopening CAN.
+    opened = target.copy()
+    opened[grippers] = 1.0
+    gripper_rate = 0.15  # normalized travel per second
+    steps = max(
+        1,
+        math.ceil(
+            float(np.max(np.abs(opened[grippers] - target[grippers])))
+            * CONTROL_HZ / gripper_rate
+        ),
+    )
+    print("opening grippers with active controllers", flush=True)
+    for index in range(1, steps + 1):
+        read_state()
+        command = target + (opened - target) * (index / steps)
+        robot.command_joint_state(command)
+        sleep(1 / CONTROL_HZ)
+    sleep(0.5)
+    actual = read_state()
+    if float(np.max(np.abs(actual[arms]))) > HOME_TOLERANCE_RAD:
+        raise RuntimeError("arms moved away from home while opening grippers")
+    if float(np.max(np.abs(actual[grippers] - 1.0))) > 0.05:
+        raise RuntimeError("grippers did not reach their calibrated open positions")
+    print("homing complete; controller may now disable motors", flush=True)
 
 
 def _gripper_interface(channel: str) -> Any:

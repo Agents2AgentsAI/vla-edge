@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Run flow-matching vision-language-action policies fast on edge hardware"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "Apache-2.0 AND MIT"
+license = "Apache-2.0 AND MIT AND BSD-3-Clause"
 license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Agents2Agents" }]
 keywords = ["robotics", "vla", "inference", "edge", "tensorrt", "coreml"]
@@ -31,10 +31,12 @@ dependencies = [
 [project.optional-dependencies]
 torch = ["torch>=2.5", "transformers>=4.57,<5", "accelerate", "safetensors", "huggingface-hub", "einops"]
 tensorrt = ["tensorrt>=10.13", "cuda-python"]
+abcvla = ["torch>=2.5", "safetensors>=0.5", "sentencepiece>=0.2", "msgpack>=1.0", "websockets>=14", "opencv-python>=4.9"]
+pi05 = ["torch>=2.5", "safetensors>=0.5", "sentencepiece>=0.2", "ruckig==0.15.3"]
 coreml = ["coremltools>=8.0", "mlx>=0.20"]
 eval = ["imageio[ffmpeg]"]
 camera = ["pyzmq>=25.0", "opencv-python>=4.9"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "msgpack>=1.0", "httpx>=0.27", "pyyaml>=6.0", "ruckig==0.15.3"]
 
 [project.urls]
 Homepage = "https://agents2agents.ai"

@@ -1,156 +1,309 @@
 # Bimanual YAM
 
-This example connects the
-[MolmoAct2-BimanualYAM](https://huggingface.co/allenai/MolmoAct2-BimanualYAM)
-policy to two I2RT YAM arms and three Intel RealSense cameras. The robot client
-captures an observation, calls a running `vla-edge` server, executes the
-returned action chunk, and records the rollout.
+Run a vision-language-action policy on two I2RT YAM arms and three RealSense
+cameras. Setup, camera serving, task launching and recording are shared across
+models; model-specific inference and control options are grouped below.
 
-The reference setup uses one Jetson AGX Thor for both inference and robot
-control. The inference server can also run on another machine.
+| Model | Policy name | Support |
+|---|---|---|
+| [ABC-VLA](#abc-vla) | `abcvla-bimanual-yam` | Thor TensorRT; native reference |
+| [MolmoAct2](#molmoact2) | `molmoact2-bimanual-yam` | PyTorch or Thor TensorRT |
+| [π0.5](#pi05) | `pi05-bimanual-yam` | Thor TensorRT |
 
-## Hardware
+**Working directory:** all commands below run from the repository root.
+If you are in `examples/bimanual-yam`, first run `cd ../..`. Activate the
+repository's environment in each terminal with `source .venv/bin/activate`.
 
-- Two YAM arms, each on its own 1 Mbit/s CAN interface
-- Three RealSense cameras: one scene camera and one wrist camera per arm
+## 1. Shared setup
+
+The reference machine is a Jetson AGX Thor. Inference can also run on a separate
+machine. The rig needs:
+
+- Two YAM arms on separate 1 Mbit/s CAN interfaces
+- Three RealSense cameras: scene, left wrist and right wrist
 - A tested hardware e-stop
 
-Before powering the arms, verify the start poses in both config files and the
-gripper open direction in `home_arms.py`. The reference grippers open in the
-negative motor direction. Configure the motor watchdog as required by I2RT;
-the reference homing path assumes it is disabled.
-
-## Setup
-
-Run these commands once from a fresh clone on Jetson Thor:
+From a fresh checkout, install the shared environment once:
 
 ```bash
-git clone https://github.com/Agents2AgentsAI/vla-edge.git
-cd vla-edge
-
 python3 -m venv .venv
 source .venv/bin/activate
 ./examples/bimanual-yam/setup_jetson_thor.sh
-
-cd examples/bimanual-yam
-python tests/test_rollout_control.py
+python examples/bimanual-yam/tests/run_tests.py
 ```
 
-## Configure the rig
+Setup installs the dependencies for all three models and the
+`vla-edge-serve` command into `.venv/bin`. The combined test command covers
+both controllers and homing/shutdown. It runs without GPU, camera or robot
+access, using quiet output with warnings and failure details reported.
+
+## 2. Configure the rig
 
 ```bash
-python configure_rig.py
-python home_arms.py
-python calibrate_grippers.py
+python examples/bimanual-yam/configure_rig.py
+python examples/bimanual-yam/home_arms.py
+python examples/bimanual-yam/calibrate_grippers.py
 ```
 
-The setup command finds the cameras and CAN interfaces, saves a labeled camera
-snapshot, asks you to confirm the physical left/right assignments and safe
-start poses, updates both config files, and brings the selected CAN links up at
-1 Mbit/s. Press Enter to keep any value shown in brackets. For CAN mapping, it
-reads joint positions without enabling the motors and asks you to hand-move one
-joint on the left arm.
+`configure_rig.py` identifies cameras and CAN interfaces, saves a labeled
+camera snapshot, asks for the physical left/right assignments and safe start
+poses, and updates `configs/yam_left.yaml` and `configs/yam_right.yaml` inside
+this example. It brings the selected CAN links up at 1 Mbit/s. Press Enter to
+keep a value shown in brackets. CAN identification reads positions without
+enabling motors and asks you to hand-move one joint on the left arm.
 
-`start_joints` is a commanded target, not a measured pose. The first six
-values are arm-joint angles in radians; the seventh is the normalized gripper
-position, where `0` is closed and `1` is open.
+Before homing, verify both start poses and the gripper open direction in
+`home_arms.py`. The reference grippers open in the negative motor direction.
+Configure the motor watchdog as required by I2RT; the reference homing path
+assumes it is disabled.
 
-`home_arms.py` moves both arms to encoder zero together, opens the grippers,
-and disables all 14 motors. `calibrate_grippers.py` then moves only the
-grippers through their physical travel and saves `[closed, open]` limits in
-both config files. Run gripper calibration once during setup and again after a
-gripper, motor, or motor zero changes. Saved limits also prevent I2RT from
-repeating the hard-stop sweep at every launch. Calibration refuses to start if
-a gripper rotor is above 45 C and disables each motor when its sweep ends.
+- `start_joints`: six arm angles in radians followed by a normalized gripper
+  position (`0` closed, `1` open). These are commanded targets.
+- `home_arms.py`: moves both arms to encoder zero, opens the grippers and
+  disables all 14 motors.
+- `calibrate_grippers.py`: moves the grippers through their travel and saves
+  `[closed, open]` limits. Repeat after changing a gripper, motor or motor zero.
+  Saved limits avoid a hard-stop calibration sweep at every launch. Calibration
+  refuses to start above a gripper rotor temperature of 45 C and disables each
+  motor when its sweep ends.
 
-The example assumes the six arm-joint encoder zeros are already calibrated.
-There is no general YAM joint-zero command here because that operation writes
-motor flash and needs a hardware-specific fixture and procedure.
+The arm-joint encoder zeros must already be calibrated. Writing joint zeros
+requires a hardware-specific fixture and procedure and is not part of setup.
 
-With no controller running, this checks both buses and leaves every motor
-disabled without sending a position command. If a controller is active, the
-command stops it first, so the controller may park the arms:
+For a disable-and-status check:
 
 ```bash
-python home_arms.py --status
+python examples/bimanual-yam/home_arms.py --status
 ```
 
-## Test and run
+This sends no position commands. It stops a running controller first, which
+may perform its normal parking sequence, then leaves the motors disabled.
 
-Open three terminals at the repository root and activate the same environment
-in each one.
-
-Terminal 1 owns the cameras:
-
-```bash
-source .venv/bin/activate
-cd examples/bimanual-yam
-bash start_camera_server.sh
-```
-
-Leave this process running. Starting it again detects the existing healthy
-server without resetting or reopening the cameras. Ctrl-C releases all three
-cameras cleanly.
-
-Terminal 2 runs the reference inference server. The checkpoint downloads on
-the first launch:
+## 3. Start the cameras — terminal 1
 
 ```bash
 source .venv/bin/activate
-vla-edge-serve --embodiment bimanual-yam --backend torch
+./examples/bimanual-yam/start_camera_server.sh
 ```
 
-Terminal 3 verifies the server and camera order, then starts a supervised
-low-speed rollout:
+Leave this process running. Repeating the command detects an existing healthy
+server without reopening the cameras. Ctrl-C releases the cameras.
+
+To check scene/left/right camera order, open a separate terminal:
 
 ```bash
 source .venv/bin/activate
-cd examples/bimanual-yam
+python examples/bimanual-yam/camera_client.py --mode sub
+```
 
-curl -f http://127.0.0.1:8202/act
-python camera_client.py --mode sub
-# Confirm the scene, left wrist, and right wrist panes, then stop the viewer.
+The viewer subscribes to the camera server. It opens a window when a display
+is available, or prints a browser URL for headless/SSH use. Confirm the three
+panes, then stop the viewer with Ctrl-C. The camera server can remain running.
 
-YAM_MAX_JOINT_VEL=0.5 bash run_task.sh \
+## 4. Choose a model — terminal 2
+
+Activate `.venv` and start one of the following servers. All examples use
+port **8202**, which is also the task launcher's default.
+
+### ABC-VLA
+
+Download the [ABC-VLA Thor bundle](https://huggingface.co/agents2agents/ABC-VLA-Jetson-Thor).
+If you already have it locally, use that directory as `--engine-dir`.
+
+```bash
+hf download agents2agents/ABC-VLA-Jetson-Thor \
+  --local-dir examples/bimanual-yam/engines/abc-vla
+vla-edge-serve --policy abcvla-bimanual-yam --backend tensorrt \
+  --engine-dir examples/bimanual-yam/engines/abc-vla
+```
+
+The bundle requires Thor, CUDA 13.2 and **TensorRT 10.16.2.10**. The server
+checks its files and hardware requirements and completes warmup before
+accepting requests. It retains the checkpoint's three RGB cameras, 30×14
+absolute action shape and 10-step sampler.
+
+**Task settings (terminal 3)**
+
+| Option for `run_task.sh` | Default | Meaning |
+|---|---|---|
+| `--rtc-prefix-length` | `5` | Remaining committed commands supplied to the next prediction |
+| `--execute-chunk-dim` | `6` | New action rows executed per cycle |
+
+ABC's `--check` preflight validates the policy, calibration, camera frames and
+CAN links without enabling motors. A controller fault skips homing and
+disables both arms.
+
+The prefix must be 1–7 rows and shorter than the executed chunk; their sum
+must fit the 30-row model horizon. For example:
+
+```bash
+./examples/bimanual-yam/run_task.sh "fold and stack the t-shirts" \
+  --rtc-prefix-length 5 --execute-chunk-dim 6
+```
+
+ABC uses measured gripper positions and a 30 Hz action clock. It requests the
+next prediction while the committed prefix executes. Arm setpoints are
+rate-limited before the chunk is committed, so the RTC prefix exactly matches
+the commands that will execute. At 3 rad/s, the nominal limit is 0.1 rad per
+arm joint per tick. Gripper commands retain native ABC behavior.
+
+**Optional offline checks**
+
+```bash
+python -m vla_edge.scripts.verify_release \
+  --bundle examples/bimanual-yam/engines/abc-vla
+python -m vla_edge.scripts.verify_abcvla_device \
+  --bundle examples/bimanual-yam/engines/abc-vla
+python -m vla_edge.scripts.smoke_abcvla \
+  --bundle examples/bimanual-yam/engines/abc-vla
+```
+
+These checks do not open robot or camera hardware. The device and smoke
+checks use the GPU. See the [ABC bundle reference](../../recipes/abcvla-jetson-thor/README.md)
+for native-checkpoint comparisons, saved observations and wire protocols.
+
+### MolmoAct2
+
+**PyTorch reference**
+
+The [BimanualYAM checkpoint](https://huggingface.co/allenai/MolmoAct2-BimanualYAM)
+downloads on the first launch:
+
+```bash
+vla-edge-serve --policy molmoact2-bimanual-yam --backend torch
+```
+
+The original `--embodiment bimanual-yam --backend torch` command also works.
+
+**Thor TensorRT bundle**
+
+```bash
+hf download agents2agents/MolmoAct2-Jetson-Thor \
+  --local-dir examples/bimanual-yam/engines/molmoact2
+vla-edge-serve --policy molmoact2-bimanual-yam --backend tensorrt \
+  --engine-dir examples/bimanual-yam/engines/molmoact2 --fast-vision
+```
+
+For a local bundle, skip the download and set `--engine-dir` to its directory.
+The released bundle includes the processor, normalization data, embeddings
+and compiled-flow weights, so serving it needs no checkpoint download. A
+locally built engine set without the compact host runtime resolves the
+required checkpoint weights and reports that in its startup log.
+
+**Task settings (terminal 3)**
+
+MolmoAct retains its smoothing, velocity clamp and optional RTC settings.
+Its `--check` preflight validates the inference server contract. For example:
+
+```bash
+YAM_MAX_JOINT_VEL=0.5 ./examples/bimanual-yam/run_task.sh \
   "pick up the rubik cube and put it in the black box"
 ```
 
-The camera client opens a window when a graphical display is available. In a
-headless or SSH session, it prints a browser URL instead. Open that URL from a
-machine on the same network, confirm the three panes, then press Ctrl-C in the
-terminal.
+Advanced options, including `YAM_RTC`, are listed in
+[`run_molmoact_task.sh`](run_molmoact_task.sh). ABC's hard-prefix flags apply
+only to ABC-VLA.
 
-Keep the e-stop within reach. From another terminal, end the rollout cleanly:
+### Pi0.5
+
+Download the [Pi0.5 BimanualYAM Thor bundle](https://huggingface.co/agents2agents/Pi0.5-BimanualYAM-Jetson-Thor),
+or point `--engine-dir` to your existing local bundle. It includes
+`pi05-serving.json` and all required inference assets.
+
+```bash
+hf download agents2agents/Pi0.5-BimanualYAM-Jetson-Thor \
+  --local-dir examples/bimanual-yam/engines/pi05
+vla-edge-serve --policy pi05-bimanual-yam --backend tensorrt \
+  --engine-dir examples/bimanual-yam/engines/pi05
+```
+
+The bundle uses the public `robocurve/pi0.5-yam` checkpoint, three RGB cameras,
+16×14 absolute joint actions and ten diffusion steps. It requires Thor,
+CUDA 13.2 and TensorRT 10.16.2.10. Gripper state is the last commanded opening.
+
+**Task settings (terminal 3)**
+
+```bash
+./examples/bimanual-yam/run_task.sh "fold the t-shirt" --check
+YAM_MAX_JOINT_VEL=0.5 ./examples/bimanual-yam/run_task.sh "fold the t-shirt"
+```
+
+The task launcher detects Pi0.5 and uses its dedicated controller: synchronous
+30 Hz policy chunks feed an independent 100 Hz Ruckig motion process. Motor
+targets remain continuous during inference and camera waits, with bounded
+velocity, acceleration and jerk. `touch /tmp/yam_done` or Ctrl-C brakes and
+homes through the still-powered controller before disabling the motors.
+
+`--check` validates the server, rig, cameras and controller dependencies without
+enabling motors. `YAM_MAX_JOINT_VEL` sets the arm speed limit; acceleration and
+jerk are bounded at 6 rad/s² and 60 rad/s³. `YAM_ACTION_HORIZON` selects 1–16
+executed rows per chunk (default 16). Keep `YAM_ASYNC_PLAN=0` (or unset) and
+`YAM_RTC=0`; Pi0.5 does not use the MolmoAct2 queue merger or ABC's prefix flags.
+
+Recordings go to `yam_eval_runs/data/pi05/<timestamp>/`. `commands.jsonl`
+contains policy goals, `motion.f64` and its JSON schema record the actual
+100 Hz references and motor feedback, and `episode.h5` contains measured
+states. Camera frames follow `storage.save_frames` in the rig configuration.
+
+**Optional offline checks**
+
+```bash
+python -m vla_edge.scripts.verify_release \
+  --bundle examples/bimanual-yam/engines/pi05
+python -m vla_edge.scripts.smoke_pi05 \
+  --bundle examples/bimanual-yam/engines/pi05
+```
+
+These commands do not access the robot or cameras. The smoke check loads
+and executes every GPU stage. See the [Pi0.5 bundle guide](../../recipes/pi05-jetson-thor/README.md)
+for saved-observation testing and bundle requirements.
+
+## 5. Run and stop a task — terminal 3
+
+Use the same task command for all three models. It reads the server's
+policy identity and selects the matching controller.
+
+```bash
+source .venv/bin/activate
+curl -f http://127.0.0.1:8202/act
+./examples/bimanual-yam/run_task.sh "fold and stack the t-shirts" --check
+./examples/bimanual-yam/run_task.sh "fold and stack the t-shirts"
+```
+
+`--check` performs preflight without enabling motors. The checks specific
+to each model are described in its section above.
+
+| Shared setting | Default | Purpose |
+|---|---|---|
+| `YAM_SERVER` | `127.0.0.1:8202` | Inference server address; override for another host or port |
+| `YAM_MAX_JOINT_VEL` | `2.2` | Arm setpoint-rate limit in rad/s |
+| `YAM_STAGE_FILE` | `/tmp/yam_done` | Task completion marker |
+
+Validate your rig at low speed and keep the e-stop within reach. To finish the
+current task from another terminal:
 
 ```bash
 touch /tmp/yam_done
 ```
 
-`run_task.sh` checks the inference server, camera server, and CAN links before
-moving. On exit it homes and de-energizes both arms. Omitting
-`YAM_MAX_JOINT_VEL` uses the reference rig's 2.2 rad/s limit; raise the limit
-only after validating your own rig at low speed.
+On a normal stop or Ctrl-C, the active controllers home the arms and open the
+grippers while keeping the motors energized. They disable the motors only
+after homing. No second controller is opened to home again. If homing fails
+or is interrupted, cleanup disables the motors; its fallback never re-enables
+them.
 
-To use a server on another machine:
+Stopping a task leaves the camera and policy servers available for the next
+one. Stop those servers separately with Ctrl-C when finished.
 
-```bash
-YAM_SERVER=192.168.1.10:8202 YAM_MAX_JOINT_VEL=0.5 \
-  bash run_task.sh "pick up the object and put it in the basket"
-```
+## 6. Recordings
 
-To serve a compatible TensorRT engine bundle, replace the server command in
-Terminal 2 with:
+Default output directory: `examples/bimanual-yam/yam_eval_runs/`.
 
-```bash
-vla-edge-serve --embodiment bimanual-yam --backend tensorrt \
-  --engine-dir /path/to/engine-bundle --fast-vision
-```
+| Model | Saved output |
+|---|---|
+| ABC-VLA | `data/abc-vla/<timestamp>/`: `episode.h5`, `commands.jsonl`, `requests.jsonl`, run manifest |
+| MolmoAct2 | Existing session directories, rollout data and starting-scene snapshots |
 
-The released bundle includes its processor, normalization data, embeddings,
-and compiled-flow weights. Serving it does not contact Hugging Face or load
-the full PyTorch checkpoint. A locally built engine set without that compact
-host runtime resolves only the required checkpoint weights and says so in the
-startup log.
-
-Rollouts and starting-scene snapshots are saved under `yam_eval_runs/`.
-Advanced rollout options are documented at the top of `run_task.sh`.
+Set `storage.save_frames: true` in `configs/yam_left.yaml` inside this example
+to save RGB frames too. Frame recording adds work to the control loop. Rig
+configuration, local bundles and recorded data belong to your local setup.

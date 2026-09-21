@@ -1,0 +1,3 @@
+# Ruckig 0.15.3 uses cmake.targets, removed in scikit-build-core 0.10.
+# Applies only inside isolated package builds; runtime requirements are unchanged.
+scikit-build-core<0.10

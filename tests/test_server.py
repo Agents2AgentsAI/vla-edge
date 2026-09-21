@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vla_edge.backends import molmoact2
 from vla_edge.serving import server
 
 
@@ -22,7 +23,7 @@ def _write_engine_set(root, name, repo_id, *, fast_vision=False):
         json.dumps({"host_dir": f"../host/{name}"})
     )
     (host / "host.json").write_text(json.dumps({"repo_id": repo_id}))
-    for filename in server._REQUIRED_ENGINE_FILES:
+    for filename in molmoact2._REQUIRED_ENGINE_FILES:
         (engine / filename).touch()
     if fast_vision:
         (engine / "vision_fp8.plan").touch()
@@ -99,6 +100,43 @@ def test_listener_reserves_port_until_closed():
 
     replacement = server._reserve_listener("127.0.0.1", port)
     replacement.close()
+
+
+@pytest.mark.parametrize(
+    ("policy_name", "horizon"),
+    [
+        ("abcvla-bimanual-yam", 30),
+        ("molmoact2-bimanual-yam", 30),
+    ],
+)
+def test_health_reports_selected_policy_and_action_horizon(policy_name, horizon):
+    import asyncio
+
+    pytest.importorskip("fastapi")
+    from vla_edge.config import get_embodiment, get_policy
+
+    policy = get_policy(policy_name)
+    pipeline = SimpleNamespace(
+        policy=policy,
+        embodiment=get_embodiment(policy.embodiment),
+        backend=SimpleNamespace(rtc_available=False, action_horizon=horizon),
+    )
+    app = server.build_app(pipeline, "tensorrt")
+    route = next(route for route in app.routes if route.path == "/act" and "GET" in route.methods)
+    response = asyncio.run(route.endpoint())
+    payload = json.loads(response.body)
+
+    assert payload["policy"] == policy_name
+    assert payload["model_family"] == policy.model_family
+    assert payload["action_horizon"] == horizon
+    assert payload["embodiment"] == "bimanual-yam"
+    assert payload["cameras"] == ["top_cam", "left_cam", "right_cam"]
+    assert payload["gripper"] == {
+        "indices": [6, 13],
+        "checkpoint_convention": "closed_0_open_1",
+        "wire_convention": "closed_0_open_1",
+        "state_source": policy.gripper_state,
+    }
 
 
 def test_port_conflict_is_reported_before_checkpoint_load(monkeypatch, caplog):

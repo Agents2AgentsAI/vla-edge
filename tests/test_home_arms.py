@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 MODULE_PATH = Path(__file__).parents[1] / "examples" / "bimanual-yam" / "home_arms.py"
 SPEC = importlib.util.spec_from_file_location("home_arms", MODULE_PATH)
@@ -186,3 +187,116 @@ def test_legacy_close_joins_control_thread_before_socket_close():
 
     assert not robot.control_thread.is_alive()
     assert robot.motor_chain.socket_closed
+
+
+class ActiveRobot:
+    def __init__(self, n_dofs=14):
+        self.state = np.tile([0.4, -0.3, 0.2, 0.1, -0.1, 0.2, 0.3], n_dofs // 7)
+        self.commands = []
+        self.enabled = True
+
+    def get_joint_state(self):
+        return self.state.copy()
+
+    def command_joint_state(self, command):
+        assert self.enabled
+        self.commands.append(np.asarray(command).copy())
+        self.state = np.asarray(command).copy()
+
+    def close(self):
+        pytest.fail("active homing must leave closing to its owner")
+
+
+@pytest.mark.parametrize("n_dofs", [7, 14])
+def test_active_homing_keeps_torque_through_home_and_gripper_open(monkeypatch, n_dofs):
+    monkeypatch.setattr(
+        home_arms,
+        "home_arms_together",
+        lambda *args, **kwargs: pytest.fail("new arm driver"),
+    )
+    monkeypatch.setattr(
+        home_arms,
+        "open_gripper",
+        lambda *args, **kwargs: pytest.fail("new gripper driver"),
+    )
+    monkeypatch.setattr(
+        home_arms,
+        "disable_and_probe",
+        lambda *args, **kwargs: pytest.fail("premature disable"),
+    )
+    robot = ActiveRobot(n_dofs)
+    initial = robot.state.copy()
+    delays = []
+    home_arms.home_active_robot(robot, sleep=delays.append)
+    commands = np.array(robot.commands)
+    arms = [i for i in range(n_dofs) if i % 7 != 6]
+    grips = list(range(6, n_dofs, 7))
+    arm_home = next(
+        i for i, command in enumerate(commands) if np.all(command[arms] == 0)
+    )
+    np.testing.assert_array_equal(
+        commands[: arm_home + 1, grips], np.tile(initial[grips], (arm_home + 1, 1))
+    )
+    np.testing.assert_array_equal(commands[arm_home:, arms], 0)
+    np.testing.assert_array_equal(commands[-1, grips], 1)
+    deltas = np.diff(np.vstack([initial, commands]), axis=0)
+    assert (
+        np.max(np.abs(deltas[:, arms]))
+        <= home_arms.DEFAULT_HOME_MAX_VEL / home_arms.CONTROL_HZ + 1e-9
+    )
+    assert np.max(np.abs(deltas[:, grips])) <= 0.15 / home_arms.CONTROL_HZ + 1e-9
+    assert robot.enabled and sum(delays) >= home_arms.MIN_HOME_DURATION_S
+
+
+def test_active_home_starts_from_last_command_without_a_handover_jump():
+    robot = ActiveRobot()
+    previous = robot.state + 0.2
+    home_arms.home_active_robot(robot, previous_command=previous, sleep=lambda _: None)
+    arms = [i for i in range(14) if i % 7 != 6]
+    assert (
+        np.max(np.abs(robot.commands[0][arms] - previous[arms]))
+        <= home_arms.DEFAULT_HOME_MAX_VEL / home_arms.CONTROL_HZ
+    )
+
+
+def test_failed_active_arm_home_does_not_open_grippers():
+    robot = ActiveRobot()
+    initial = robot.state.copy()
+
+    def stuck(command):
+        robot.commands.append(np.asarray(command).copy())
+        # Live feedback remains away from q=0.
+
+    robot.command_joint_state = stuck
+    with pytest.raises(RuntimeError, match="homing error"):
+        home_arms.home_active_robot(robot, sleep=lambda _: None)
+    assert all(
+        np.array_equal(command[[6, 13]], initial[[6, 13]]) for command in robot.commands
+    )
+
+
+def test_active_homing_aborts_immediately_when_live_feedback_fails():
+    robot = ActiveRobot()
+
+    def state():
+        if robot.commands:
+            raise RuntimeError("motor chain stopped")
+        return robot.state.copy()
+
+    robot.get_joint_state = state
+    with pytest.raises(RuntimeError, match="motor chain stopped"):
+        home_arms.home_active_robot(robot, sleep=lambda _: None)
+    assert len(robot.commands) == 1
+
+
+@pytest.mark.parametrize("argv,cwd,expected", [
+    ([b"python3", b"/checkout/examples/bimanual-yam/run_task.py", b"fold"], None, True),
+    ([b"python3", b"-B", b"examples/bimanual-yam/run_task.py", b"fold"], None, True),
+    ([b"python3", b"run_task.py", b"fold"], "/checkout/examples/bimanual-yam", True),
+    ([b"python3", b"run_task.py"], "/checkout/other", False),
+    ([b"python3", b"/checkout/other/run_task.py"], None, False),
+    ([b"python3", b"-m", b"pytest", b"/checkout/examples/bimanual-yam/run_task.py"], None, False),
+    ([b"bash", b"-c", b"cat /checkout/examples/bimanual-yam/run_task.py"], None, False),
+])
+def test_shared_task_detection_is_scoped_to_the_yam_controller(argv, cwd, expected):
+    assert home_arms._is_shared_yam_task(argv, cwd) is expected

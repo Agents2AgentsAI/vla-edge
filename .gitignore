@@ -41,3 +41,7 @@ examples/bimanual-yam/configs/*.setup.bak
 examples/bimanual-yam/configs/*.calibration.bak
 # rollout outputs and scene snapshots from the bimanual-yam example
 examples/bimanual-yam/yam_eval_runs/
+
+# Local example bundles and reference camera images
+examples/bimanual-yam/engines/
+examples/bimanual-yam/cam_refs/

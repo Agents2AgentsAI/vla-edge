@@ -66,6 +66,7 @@ from gello_min.launch_utils import instantiate_from_dict, move_to_start_position
 from gello_min.logging_utils import log_collect_demos
 from gello_min.realsense_camera import RealSenseCamera, get_device_ids
 from gello_min.robot import BimanualRobot
+from home_arms import home_active_robot
 from molmoact_client import MolmoAct, MolmoActLocal
 from omegaconf import OmegaConf
 
@@ -119,9 +120,10 @@ def _park_robot() -> None:
     print("Parking robot at start position...")
     try:
         if _bimanual:
-            move_to_start_position(_env, True, _left_cfg, _right_cfg)
+            previous = move_to_start_position(_env, True, _left_cfg, _right_cfg)
         else:
-            move_to_start_position(_env, False, _left_cfg)
+            previous = move_to_start_position(_env, False, _left_cfg)
+        home_active_robot(_env.robot(), previous_command=previous, max_joint_vel=V_MAX)
     except Exception as exc:  # noqa: BLE001  # best-effort cleanup
         logger.warning("Parking failed: %s", exc)
 
@@ -1551,11 +1553,14 @@ def main() -> None:
     )
 
     eval_cfg = left_cfg.get("eval") or {}
-    mode = eval_cfg.get("mode", "server")
+    mode = "server" if os.getenv("YAM_POLICY") == "pi05-bimanual-yam" else eval_cfg.get("mode", "server")
     if mode == "local":
         policy = MolmoActLocal(**(eval_cfg.get("local") or {}))
     elif mode == "server":
-        policy = MolmoAct(server=eval_cfg.get("molmoact_server"))
+        if os.getenv("YAM_POLICY") == "pi05-bimanual-yam":
+            raise ValueError("Pi0.5 requires run_task.sh and its independent bounded motion controller")
+        else:
+            policy = MolmoAct(server=eval_cfg.get("molmoact_server"))
     else:
         raise SystemExit(f"eval.mode must be 'server' or 'local', got {mode!r}")
     run_session(

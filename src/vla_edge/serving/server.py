@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Inference server.
 
 One endpoint, ``/act``, json_numpy encoded, batch 1. Deliberately boring: the
@@ -11,6 +12,7 @@ import errno
 import json
 import logging
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -20,8 +22,12 @@ from urllib import request as urlrequest
 import json_numpy
 import numpy as np
 
-from ..config import EMBODIMENTS, get_embodiment
-from ..pipeline import Pipeline
+# Support direct execution from this checkout as well as the installed CLI.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from vla_edge.config import POLICIES, get_embodiment, resolve_policy
+from vla_edge.pipeline import Pipeline
 
 # Patches the stdlib json module so ndarrays round-trip. Must happen before
 # anything serializes.
@@ -83,10 +89,13 @@ def _probe_existing_server(
 
 def _server_summary(metadata: dict[str, Any]) -> str:
     keys = (
+        "policy",
         "embodiment",
         "repo_id",
         "norm_tag",
+        "model_family",
         "backend",
+        "action_horizon",
         "device",
         "dtype",
         "rtc",
@@ -116,79 +125,20 @@ def _report_bind_error(host: str, port: int, exc: OSError) -> None:
         )
 
 
-_REQUIRED_ENGINE_FILES = (
-    "llm_prefill.plan",
-    "vision.plan",
-    "action_flow.plan",
-)
-
-
-def _declared_engine_repo(engine_dir: Path) -> str | None:
-    """Return the checkpoint declared by an engine set's compact host."""
-    try:
-        serving = json.loads((engine_dir / "serving.json").read_text())
-        host_dir = serving.get("host_dir")
-        if host_dir is None:
-            return None
-        host_path = Path(str(host_dir))
-        if not host_path.is_absolute():
-            host_path = engine_dir / host_path
-        host_manifest = json.loads((host_path.resolve() / "host.json").read_text())
-    except (OSError, TypeError, ValueError):
-        return None
-    repo_id = host_manifest.get("repo_id")
-    return str(repo_id) if repo_id else None
-
-
 def _resolve_engine_dir(
     engine_dir: str | Path,
     *,
     repo_id: str,
     fast_vision: bool,
 ) -> Path:
-    """Accept either an engine-set directory or a released bundle root."""
-    root = Path(engine_dir).expanduser().resolve()
-    if (root / "serving.json").is_file() or not (root / "MANIFEST.json").is_file():
-        return root
+    """Compatibility wrapper for the relocated MolmoAct2 resolver."""
 
-    discovered = [
-        child
-        for child in sorted(root.iterdir())
-        if child.is_dir()
-        and (child / "serving.json").is_file()
-        and all((child / name).is_file() for name in _REQUIRED_ENGINE_FILES)
-    ]
-    candidates = [
-        child
-        for child in discovered
-        if _declared_engine_repo(child) in (None, repo_id)
-    ]
-    if fast_vision:
-        accelerated = [
-            child for child in candidates if (child / "vision_fp8.plan").is_file()
-        ]
-        if len(accelerated) == 1:
-            candidates = accelerated
+    from ..backends.molmoact2 import resolve_engine_dir
 
-    if len(candidates) == 1:
-        selected = candidates[0]
-        log.info("bundle root %s: selected engine set %s", root, selected.name)
-        return selected
-
-    if candidates:
-        choices = ", ".join(str(path) for path in candidates)
-        raise ValueError(
-            f"{root} contains multiple engine sets for {repo_id}. "
-            f"Pass one explicitly with --engine-dir: {choices}"
-        )
-
-    found = ", ".join(
-        f"{path.name} ({_declared_engine_repo(path) or 'checkpoint unknown'})"
-        for path in discovered
-    ) or "none"
-    raise ValueError(
-        f"{root} is a bundle root but contains no engine set for {repo_id}. "
-        f"Found: {found}"
+    return resolve_engine_dir(
+        engine_dir,
+        repo_id=repo_id,
+        fast_vision=fast_vision,
     )
 
 
@@ -197,7 +147,11 @@ def build_app(pipeline: Pipeline, backend_name: str):
     from fastapi.responses import JSONResponse, Response
 
     emb = pipeline.embodiment
+    policy = pipeline.policy
     app = FastAPI(title=f"vla-edge · {emb.name}", version="0.1.0")
+    mount = getattr(pipeline.backend, "mount_routes", None)
+    if callable(mount):
+        mount(app, pipeline)
 
     def _error(status: int, message: str):
         return Response(
@@ -208,19 +162,39 @@ def build_app(pipeline: Pipeline, backend_name: str):
 
     @app.get("/act")
     async def health():
-        return JSONResponse(
-            {
-                "status": "ok",
-                "embodiment": emb.name,
-                "repo_id": emb.repo_id,
-                "norm_tag": emb.norm_tag,
-                "backend": backend_name,
-                "cameras": list(emb.camera_names),
-                "state_dim": emb.state_dim,
-                "default_num_steps": emb.default_num_steps,
-                "rtc": bool(getattr(pipeline.backend, "rtc_available", False)),
+        payload = {
+            "status": "ok",
+            "embodiment": emb.name,
+            "policy": policy.name,
+            "repo_id": policy.repo_id,
+            "norm_tag": policy.norm_tag,
+            "model_family": policy.model_family,
+            "backend": backend_name,
+            "cameras": list(emb.camera_names),
+            "state_dim": emb.state_dim,
+            "action_dim": emb.action_dim,
+            "action_space": policy.action_space,
+            "action_horizon": int(
+                getattr(pipeline.backend, "action_horizon", policy.action_horizon)
+            ),
+            "default_num_steps": policy.default_num_steps,
+            "rtc": bool(getattr(pipeline.backend, "rtc_available", False)),
+        }
+        if emb.gripper_indices:
+            payload["gripper"] = {
+                "indices": list(emb.gripper_indices),
+                "checkpoint_convention": policy.gripper_convention,
+                "wire_convention": emb.gripper_convention,
+                "state_source": policy.gripper_state,
             }
-        )
+        metadata = getattr(pipeline.backend, "serving_metadata", None)
+        if callable(metadata):
+            payload["runtime"] = metadata()
+        for field in ("rtc_mode", "max_prefix_length"):
+            value = getattr(pipeline.backend, field, None)
+            if value is not None:
+                payload[field] = value
+        return JSONResponse(payload)
 
     @app.get("/healthz")
     async def healthz():
@@ -246,51 +220,66 @@ def build_app(pipeline: Pipeline, backend_name: str):
                 f"and a ({emb.state_dim},) 'state' array.",
             )
 
-        # Optional Real-Time Chunking guidance: a client mid-episode may send
-        # the not-yet-executed rows of the previous chunk so the next chunk
-        # stays consistent with what the robot is already committed to. The
-        # fields are honored or refused loudly, never silently ignored.
         rtc_telemetry = None
-        if payload.get("prefix_actions") is not None:
-            arm = getattr(pipeline.backend, "arm_rtc", None)
-            if arm is None:
-                return _error(
-                    400,
-                    "this server's backend does not implement RTC guidance; "
-                    "drop the prefix_actions field or serve a tensorrt "
-                    "engine set whose bundle ships a flow package",
-                )
-            try:
-                rtc_telemetry = arm(
-                    payload["prefix_actions"],
-                    inference_delay=int(payload.get("inference_delay", 0)),
-                    execution_horizon=int(payload.get("execution_horizon", 10)),
-                    rtc_schedule=payload.get("rtc_schedule"),
-                    rtc_max_guidance=payload.get("rtc_max_guidance"),
-                )
-            except ValueError as exc:
-                return _error(400, str(exc))
-
         num_steps = payload.get("num_steps")
+        # Sampler seed: ``seed`` explicitly, or the legacy ``episode_id`` the
+        # bimanual-yam client has always sent. One value per episode pins the
+        # flow-matching noise so consecutive chunks agree except for what the
+        # observation changed; the async merge otherwise sees a fresh sample
+        # every ~0.3 s and conflicts on every plan.
+        seed = payload.get("seed", payload.get("episode_id"))
+        if seed is not None:
+            try:
+                seed = int(seed)
+            except (TypeError, ValueError):
+                return _error(400, f"seed must be an integer, got {seed!r}")
         t0 = time.perf_counter()
         try:
-            actions = pipeline.predict(
-                cameras=cameras,
-                instruction=instruction,
-                state=state,
-                num_steps=int(num_steps) if num_steps is not None else None,
-                enable_cuda_graph=bool(payload.get("enable_cuda_graph", False)),
-            )
+            if payload.get("prefix_actions") is not None:
+                arm = getattr(pipeline.backend, "arm_rtc", None)
+                if not callable(arm):
+                    raise ValueError("this server's backend does not implement RTC")
+                rtc_args = {
+                    "inference_delay": int(payload.get("inference_delay", 0)),
+                    "execution_horizon": int(payload.get("execution_horizon", 10)),
+                    "rtc_schedule": payload.get("rtc_schedule"),
+                    "rtc_max_guidance": payload.get("rtc_max_guidance"),
+                }
+                if "prefix_length" in payload:
+                    rtc_args["prefix_length"] = payload["prefix_length"]
+                try:
+                    rtc_telemetry = arm(payload["prefix_actions"], **rtc_args)
+                except TypeError as exc:
+                    raise ValueError(f"unsupported RTC arguments: {exc}") from exc
+            elif payload.get("prefix_length") is not None:
+                raise ValueError("prefix_length requires prefix_actions")
+            kwargs = {
+                "cameras": cameras,
+                "instruction": instruction,
+                "state": state,
+                "num_steps": int(num_steps) if num_steps is not None else None,
+                "enable_cuda_graph": bool(payload.get("enable_cuda_graph", False)),
+                "seed": seed,
+            }
+            if payload.get("noise") is not None:
+                kwargs["noise"] = payload["noise"]
+            actions = pipeline.predict(**kwargs)
         except ValueError as exc:
             return _error(400, str(exc))
         except Exception as exc:
             log.exception("inference failed")
             return _error(500, f"inference failed: {exc}")
+        finally:
+            # Request-scoped prefixes must not leak after a shape/seed/engine failure.
+            clear = getattr(pipeline.backend, "clear_rtc", None)
+            if callable(clear):
+                clear()
         dt_ms = (time.perf_counter() - t0) * 1000.0
 
         body: dict = {
             "actions": np.asarray(actions, dtype=np.float32),
             "dt_ms": dt_ms,
+            "seed": seed,
         }
         if rtc_telemetry is not None:
             body["rtc"] = rtc_telemetry
@@ -304,8 +293,17 @@ def build_app(pipeline: Pipeline, backend_name: str):
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--embodiment", default="bimanual-yam",
-                    choices=sorted(EMBODIMENTS))
+    ap.add_argument(
+        "--policy",
+        default=None,
+        help="trained policy spec, independent of the robot embodiment "
+             f"(built-ins: {', '.join(sorted(POLICIES))})",
+    )
+    ap.add_argument(
+        "--embodiment",
+        default=None,
+        help="legacy/default-policy selector; new commands should use --policy",
+    )
     ap.add_argument("--backend", default="torch")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8202)
@@ -314,8 +312,12 @@ def main(argv: list[str] | None = None) -> int:
                     choices=["bfloat16", "float16", "float32"])
     ap.add_argument("--no-warmup", action="store_true")
     ap.add_argument("--engine-dir", default=None,
-                    help="tensorrt backend: an engine-set directory or a "
+                    help="ABC native/compiled backends: an abcvla-serving.json bundle; "
+                         "tensorrt backend: an engine-set directory or a "
                          "released bundle root containing one matching set")
+    ap.add_argument("--checkpoint", default=None,
+                    help="optional local checkpoint override; the selected "
+                         "model-family loader validates whether it is allowed")
     ap.add_argument("--pad-multiple", type=int, default=None,
                     help="tensorrt backend: pad prompts to a multiple of "
                          "this length. Default: the engine set's own "
@@ -330,27 +332,28 @@ def main(argv: list[str] | None = None) -> int:
                          "on the same 400-episode evaluation as the default "
                          "set (see the bundle README for its numbers)")
     args = ap.parse_args(argv)
-    emb = get_embodiment(args.embodiment)
+    try:
+        policy = resolve_policy(policy=args.policy, embodiment=args.embodiment)
+        get_embodiment(policy.embodiment)      # validates the pairing
+    except (KeyError, ValueError) as exc:
+        ap.error(str(exc))
 
-    backend_kwargs: dict = {}
-    if args.backend == "tensorrt":
-        if not args.engine_dir:
-            ap.error("--backend tensorrt requires --engine-dir")
-        try:
-            engine_dir = _resolve_engine_dir(
-                args.engine_dir,
-                repo_id=emb.repo_id,
-                fast_vision=args.fast_vision,
-            )
-        except ValueError as exc:
-            ap.error(str(exc))
-        backend_kwargs = {
-            "engine_dir": engine_dir,
-            "pad_multiple": args.pad_multiple,
-            "fast_vision": args.fast_vision,
-        }
-    elif args.fast_vision:
+    if args.backend == "tensorrt" and not args.engine_dir:
+        ap.error(f"--backend {args.backend} requires --engine-dir")
+    if args.backend != "tensorrt" and args.fast_vision:
         ap.error("--fast-vision applies only to --backend tensorrt")
+    if args.backend != "tensorrt" and args.pad_multiple is not None:
+        ap.error("--pad-multiple applies only to --backend tensorrt")
+    backend_kwargs: dict = {
+        "engine_dir": (
+            Path(args.engine_dir).expanduser().resolve()
+            if args.engine_dir is not None
+            else None
+        ),
+        "checkpoint": args.checkpoint,
+        "pad_multiple": args.pad_multiple,
+        "fast_vision": args.fast_vision,
+    }
 
     try:
         listener = _reserve_listener(args.host, args.port)
@@ -363,10 +366,16 @@ def main(argv: list[str] | None = None) -> int:
         bound_port = int(listener.getsockname()[1])
         log.info("reserved inference port %s:%d", args.host, bound_port)
 
-        log.info("loading %s on %s (%s), backend=%s",
-                 emb.repo_id, args.device, args.dtype, args.backend)
+        log.info(
+            "loading policy=%s checkpoint=%s on %s (%s), backend=%s",
+            policy.name,
+            args.checkpoint or policy.repo_id,
+            args.device,
+            args.dtype,
+            args.backend,
+        )
         pipeline = Pipeline.load(
-            emb, backend=args.backend, device=args.device, dtype=args.dtype,
+            policy, backend=args.backend, device=args.device, dtype=args.dtype,
             **backend_kwargs,
         )
 

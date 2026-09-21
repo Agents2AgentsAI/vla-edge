@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import threading
@@ -11,6 +12,12 @@ from collections import deque
 from pathlib import Path
 from unittest import mock
 
+if __name__ == "__main__":
+    from run_tests import run
+
+    raise SystemExit(run(Path(__file__).resolve()))
+
+
 import numpy as np
 
 YAM_DIR = Path(__file__).resolve().parents[1]
@@ -18,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(YAM_DIR))
 sys.path.insert(0, str(REPO_ROOT))
 
-import launch_yaml_eval_molmoact as rollout
+rollout = importlib.import_module("launch_yaml_eval_molmoact")
 
 
 class _FakeEnv:
@@ -884,15 +891,14 @@ class ShutdownTests(unittest.TestCase):
         rollout._park_done = False
         rollout._env_close_done = False
 
-        with mock.patch.object(
-            rollout,
-            "move_to_start_position",
-            side_effect=lambda *_args: events.append("park"),
+        with (
+            mock.patch.object(rollout, "move_to_start_position", side_effect=lambda *_args: events.append("park")),
+            mock.patch.object(rollout, "home_active_robot", side_effect=lambda *_args, **_kwargs: events.append("home")),
         ):
             rollout._shutdown_robot()
             rollout._shutdown_robot()
 
-        self.assertEqual(events, ["park", "close"])
+        self.assertEqual(events, ["park", "home", "close"])
 
     def test_lerobot_conversion_requires_recorded_frames(self):
         with mock.patch.object(rollout, "convert_session_to_lerobot") as convert:
@@ -938,7 +944,3 @@ class ShutdownTests(unittest.TestCase):
 
         shutdown.assert_called_once_with()
         convert.assert_not_called()
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)

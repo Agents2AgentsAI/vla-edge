@@ -131,6 +131,7 @@ class TensorRTBackend:
         self,
         model: Any,
         processor: Any,
+        policy: Any,
         embodiment: Any,
         engine_dir: str | Path,
         pad_multiple: int | None = None,
@@ -142,7 +143,9 @@ class TensorRTBackend:
 
         self.model = model
         self.processor = processor
+        self.policy = policy
         self.embodiment = embodiment
+        self.action_horizon = int(policy.action_horizon)
         self._lock = threading.Lock()
 
         engine_dir = Path(engine_dir).resolve()
@@ -292,11 +295,11 @@ class TensorRTBackend:
             )
 
         stats = self.model._get_robot_stats()
-        normalizer = stats.action_normalizers.get(self.embodiment.norm_tag)
+        normalizer = stats.action_normalizers.get(self.policy.norm_tag)
         if normalizer is None:
             raise ValueError(
                 "checkpoint has no action normalizer for norm tag "
-                f"{self.embodiment.norm_tag!r}"
+                f"{self.policy.norm_tag!r}"
             )
         chunk = int(self._core._resolve_action_horizon())
         adim = int(self._core.config.max_action_dim)
@@ -352,7 +355,7 @@ class TensorRTBackend:
                 images=images,
                 task=instruction,
                 state=state_f32,
-                norm_tag=self.embodiment.norm_tag,
+                norm_tag=self.policy.norm_tag,
                 inference_action_mode="continuous",
                 enable_depth_reasoning=False,
                 num_steps=num_steps,
@@ -421,7 +424,7 @@ class TensorRTBackend:
                 images=[dummy] * self.embodiment.num_cameras,
                 instruction="warmup",
                 state=np.zeros(self.embodiment.state_dim, dtype=np.float32),
-                num_steps=self.embodiment.default_num_steps,
+                num_steps=self.policy.default_num_steps,
             )
 
     # --------------------------------------------------------------- TRT path
@@ -608,14 +611,18 @@ class TensorRTBackend:
 
 
 def _factory(
-    model: Any, processor: Any, embodiment: Any, **kwargs: Any
+    model: Any,
+    processor: Any,
+    policy: Any,
+    embodiment: Any,
+    **kwargs: Any,
 ) -> TensorRTBackend:
     if "engine_dir" not in kwargs:
         raise TypeError(
             "the tensorrt backend needs engine_dir=<path to built or "
             "prebuilt plans> (e.g. the yam/ directory of the artifact bundle)"
         )
-    return TensorRTBackend(model, processor, embodiment, **kwargs)
+    return TensorRTBackend(model, processor, policy, embodiment, **kwargs)
 
 
 REGISTRY.register("tensorrt", _factory)

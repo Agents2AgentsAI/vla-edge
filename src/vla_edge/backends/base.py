@@ -16,6 +16,33 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
+class PolicyRuntime(Protocol):
+    """Whole-policy contract consumed by the model-agnostic pipeline.
+
+    A model family may implement this with native eager execution, staged
+    TensorRT engines, or another accelerator. Family-specific intermediate
+    tensor shapes do not leak through this boundary.
+    """
+
+    name: str
+    action_horizon: int
+
+    def generate_actions(
+        self,
+        *,
+        images: list[Any],
+        instruction: str,
+        state: Any,
+        num_steps: int,
+        enable_cuda_graph: bool = False,
+    ) -> Any:
+        ...
+
+    def warmup(self) -> None:
+        ...
+
+
+@runtime_checkable
 class VLABackend(Protocol):
     """One compute backend for one checkpoint on one device.
 

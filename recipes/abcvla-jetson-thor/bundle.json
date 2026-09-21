@@ -1,0 +1,7 @@
+{
+  "repository": "agents2agents/ABC-VLA-Jetson-Thor",
+  "bundle_schema_version": 2,
+  "manifest_sha256": "bdb2829c497128b6245268746569b0d7e42fc969947646f2de755720d62c74f8",
+  "descriptor_sha256": "4e2f3a58d167ea53a2e243f8ac77ff168c9c00f2633613955671688817727873",
+  "bytes": 24840181425
+}

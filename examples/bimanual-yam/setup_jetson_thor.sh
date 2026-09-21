@@ -36,8 +36,10 @@ echo "[3/6] Installing the Jetson linear algebra runtime"
 "$PYTHON" "$REPO_ROOT/scripts/jetson_thor_postinstall.py"
 
 echo "[4/6] Installing vla-edge and the robot client"
-"$PYTHON" -m pip install -e "${REPO_ROOT}[torch,camera,eval]"
+"$PYTHON" -m pip install --build-constraint "$REPO_ROOT/build-constraints.txt" \
+  -e "${REPO_ROOT}[torch,abcvla,pi05,camera,eval]"
 "$PYTHON" -m pip install -r "$HERE/requirements.txt"
+"$PYTHON" -m pip install "pytest>=8.0"
 
 echo "[5/6] Installing the I2RT YAM driver"
 # ruckig 0.15.3 builds from source. The build-only constraint keeps its old
@@ -54,6 +56,11 @@ import vla_edge
 import i2rt
 import einops
 import pyrealsense2
+import sentencepiece
+import msgpack
+import websockets
+from vla_edge.config import get_policy
+assert get_policy("abcvla-bimanual-yam").default_num_steps == 10
 
 assert torch.version.cuda, "CPU-only torch: reinstall from the Jetson SBSA index"
 assert "sm_110" in torch.cuda.get_arch_list(), "torch does not include Thor sm_110"
